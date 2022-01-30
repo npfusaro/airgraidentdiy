@@ -68,13 +68,21 @@ void setup() {
 
   // Init Display.
   display.init();
-  bme.begin();
   showTextRectangle("Init", String(ESP.getChipId(),HEX),false);
 
   // Enable sensors.
-  ag.PMS_Init();
-  ag.CO2_Init();
-  ag.TMP_RH_Init(0x44);
+  if(hasPM){
+      ag.PMS_Init();
+  }
+  if(hasCO2){
+      ag.CO2_Init();
+  }
+  if(hasSHT){
+      ag.TMP_RH_Init(0x44);
+  }
+  if(hasBME){
+      bme.begin();
+  }
 
   // Set static IP address if configured.
   #ifdef staticip
