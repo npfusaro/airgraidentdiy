@@ -7,13 +7,27 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <WiFiClient.h>
+#include <BME280I2C.h>
 
 #include <Wire.h>
 #include "SSD1306Wire.h"
 
 AirGradient ag = AirGradient();
+BME280I2C bme;    // Default : forced mode, standby time = 1000 ms
+                  // Oversampling = pressure ×1, temperature ×1, humidity ×1, filter off,
 
+/////
 // Config ----------------------------------------------------------------------
+
+// set sensors that you do not use to false
+boolean hasPM = false;
+boolean hasCO2 = false;
+boolean hasSHT = false;
+boolean hasBME280 = true;
+
+
+// set to true to switch display from Celcius to Fahrenheit
+boolean inF = true;
 
 // Optional.
 const char* deviceId = "";
@@ -37,6 +51,13 @@ const int updateFrequency = 5000;
 long lastUpdate;
 int counter = 0;
 
+String CO2 = "0";
+int PM25 = 0;
+float Temperature = 0;
+float Humidity = 0;
+float Pressure = 0;
+
+
 // Config End ------------------------------------------------------------------
 
 SSD1306Wire display(0x3c, SDA, SCL, GEOMETRY_64_48);
@@ -47,7 +68,8 @@ void setup() {
 
   // Init Display.
   display.init();
-  showTextRectangle("Init", String(ESP.getChipId(),HEX),true);
+  bme.begin();
+  showTextRectangle("Init", String(ESP.getChipId(),HEX),false);
 
   // Enable sensors.
   ag.PMS_Init();
@@ -76,7 +98,7 @@ void setup() {
   Serial.println("");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    showTextRectangle("Trying to", "connect...", true);
+    showTextRectangle("Trying to", "connect...", false);
     Serial.print(".");
   }
 
@@ -99,52 +121,66 @@ void setup() {
 }
 
 void loop() {
-  long t = millis();
+  long now = millis();
 
   server.handleClient();
-  updateScreen(t);
+  if ((now - lastUpdate) > updateFrequency) {
+    // Take a measurement at a fixed interval.
+    getData();
+    displayData();
+    lastUpdate = millis();
+  }
 }
 
 String GenerateMetrics() {
   String message = "";
   String idString = "{id=\"" + String(deviceId) + "\",mac=\"" + WiFi.macAddress().c_str() + "\"}";
 
+  if(hasPM){
+    message += "# HELP pm02 Particulate Matter PM2.5 value\n";
+    message += "# TYPE pm02 gauge\n";
+    message += "pm02";
+    message += idString;
+    message += String(PM25);
+   message += "\n";
+  }
 
-  int PM2Stat = ag.getPM2_Raw();
+  if(hasCO2){
+    message += "# HELP rco2 CO2 value, in ppm\n";
+    message += "# TYPE rco2 gauge\n";
+    message += "rco2";
+    message += idString;
+    message += String(CO2);
+    message += "\n";
+  }
 
-  message += "# HELP pm02 Particulate Matter PM2.5 value\n";
-  message += "# TYPE pm02 gauge\n";
-  message += "pm02";
-  message += idString;
-  message += String(PM2Stat);
-  message += "\n";
+  if(hasSHT || hasBME280){
+    message += "# HELP atmp Temperature, in degrees Celsius\n";
+    message += "# TYPE atmp gauge\n";
+    message += "atmp";
+    message += idString;
+    message += String(Temperature);
+    message += "\n";
+  }
 
-  
-  int CO2Stat = ag.getCO2_Raw();
+  if(hasSHT || hasBME280){
+    message += "# HELP rhum Relative Humidity, in percent\n";
+    message += "# TYPE rhum gauge\n";
+    message += "rhum";
+    message += idString;
+    message += String(Humidity);
+    message += "\n";
+  }
 
-  message += "# HELP rco2 CO2 value, in ppm\n";
-  message += "# TYPE rco2 gauge\n";
-  message += "rco2";
-  message += idString;
-  message += String(CO2Stat);
-  message += "\n";
-  
-  TMP_RH stat = ag.periodicFetchData();
+  if(hasBME280){
+    message += "# HELP pres Barometric Pressure, in hPa\n";
+    message += "# TYPE pres gauge\n";
+    message += "pres";
+    message += idString;
+    message += String(Pressure);
+    message += "\n";
+  }
 
-  message += "# HELP atmp Temperature, in degrees Celsius\n";
-  message += "# TYPE atmp gauge\n";
-  message += "atmp";
-  message += idString;
-  message += String(stat.t);
-  message += "\n";
-
-  message += "# HELP rhum Relative humidity, in percent\n";
-  message += "# TYPE rhum gauge\n";
-  message += "rhum";
-  message += idString;
-  message += String(stat.rh);
-  message += "\n";
-  
   return message;
 }
 
@@ -181,9 +217,35 @@ void showTextRectangle(String ln1, String ln2, boolean small) {
   display.display();
 }
 
+void getData(){
+
+  if(hasSHT){
+    TMP_RH stat = ag.periodicFetchData();
+    Temperature = stat.t;
+    Humidity = stat.rh;
+  }
+  
+  if(hasCO2){
+    String tempCO2 = ag.getCO2(3);
+    if(tempCO2 != "NULL" || tempCO2 != "17410"){
+      CO2 = tempCO2;
+    }
+  }
+  
+  if(hasBME280){
+    BME280::TempUnit tempUnit(BME280::TempUnit_Celsius);
+    BME280::PresUnit presUnit(BME280::PresUnit_hPa);
+    bme.read(Pressure, Temperature, Humidity, tempUnit, presUnit);
+  }
+
+  if(hasPM){
+    PM25 = ag.getPM2_Raw();
+  }
+  
+}
+
 void displayData() {
-  TMP_RH stat = ag.periodicFetchData();
-  float tempValue = (float(stat.t) * 1.8) + 32;  
+  
   display.clear();
   display.setTextAlignment(TEXT_ALIGN_LEFT);
   display.setFont(ArialMT_Plain_10);
@@ -192,17 +254,24 @@ void displayData() {
   display.drawString(0, 24, "CO2");
   display.drawString(0, 36, "PM2.5");
   display.setTextAlignment(TEXT_ALIGN_RIGHT);
-  display.drawString(64, 0, String(tempValue, 1) + " °F");
-  display.drawString(64, 12, String(stat.rh) + " %");
-  display.drawString(64, 24, String(ag.getCO2_Raw()));
-  display.drawString(64, 36, String(ag.getPM2_Raw()));
+  if(inF){
+    float tempValue = (float(Temperature) * 1.8) + 32; 
+    display.drawString(64, 0, String(tempValue, 1) + " °F");
+  }
+  else{
+    display.drawString(64, 0, String(Temperature, 1) + " °C");
+  }
+  display.drawString(64, 12, String(Humidity, 1) + " %");
+  display.drawString(64, 24, CO2);
+  display.drawString(64, 36, String(PM25));
   display.display();
 }
 
 void updateScreen(long now) {
   if ((now - lastUpdate) > updateFrequency) {
     // Take a measurement at a fixed interval.
-    displayData();
+    getData();
+    //displayData();
     lastUpdate = millis();
   }
 }
