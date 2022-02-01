@@ -8,24 +8,22 @@
 #include <ESP8266WebServer.h>
 #include <WiFiClient.h>
 #include <BME280I2C.h>
-
 #include <Wire.h>
 #include "SSD1306Wire.h"
+#include "s8_uart.h"
 
-AirGradient ag = AirGradient();
-BME280I2C bme;    // Default : forced mode, standby time = 1000 ms
-                  // Oversampling = pressure ×1, temperature ×1, humidity ×1, filter off,
+#define S8_RX_PIN D4         // Rx pin which the S8 Tx pin is attached to (change if it is needed)
+#define S8_TX_PIN D3         // Tx pin which the S8 Rx pin is attached to (change if it is needed)
 
-/////
 // Config ----------------------------------------------------------------------
 
 // set sensors that you do not use to false
-boolean hasPM = false;
+boolean hasPM = true;
 boolean hasCO2 = false;
 boolean hasSHT = false;
 boolean hasBME280 = true;
 
-
+#define disableCO2ABC // Uncomment this code to disable CO2 Auto Background Calibration 
 // set to true to switch display from Celcius to Fahrenheit
 boolean inF = true;
 
@@ -34,7 +32,7 @@ const char* deviceId = "";
 
 // WiFi and IP connection info.
 const char* ssid = "SSID HERE";
-const char* password = "PASSWORD";
+const char* password = "P";
 const int port = 9926;
 
 #define staticip
@@ -44,30 +42,37 @@ IPAddress gateway(192, 168, 2, 1);
 IPAddress subnet(255, 255, 255, 0);
 #endif
 
-// The frequency of measurement updates.
-const int updateFrequency = 5000;
 
-// For housekeeping.
+
+const int updateFrequency = 5000; // The frequency of measurement updates.
 long lastUpdate;
 int counter = 0;
-
-String CO2 = "0";
-int PM25 = 0;
-float Temperature = 0;
-float Humidity = 0;
-float Pressure = 0;
-
+int CO2 = -1;
+int PM25 = -1;
+float Temperature = -1;
+float TemperatureOffset = - 0.7;
+float Humidity = -1;
+float HumidityOffset = 0;
+float Pressure = -1;
+float PressureOffset = 0;
 
 // Config End ------------------------------------------------------------------
 
-SSD1306Wire display(0x3c, SDA, SCL, GEOMETRY_64_48);
+SoftwareSerial S8_serial(S8_RX_PIN, S8_TX_PIN);
+SSD1306Wire display(0x3c, SDA, SCL, GEOMETRY_128_32);
 ESP8266WebServer server(port);
+S8_UART *sensor_S8;
+AirGradient ag = AirGradient();
+BME280I2C bme;            // Default : forced mode, standby time = 1000 ms
+                          // Oversampling = pressure ×1, temperature ×1, humidity ×1, filter off,
 
 void setup() {
   Serial.begin(9600);
-
+  delay(100);
   // Init Display.
   display.init();
+  //display.flipScreenVertically();
+
   showTextRectangle("Init", String(ESP.getChipId(),HEX),false);
 
   // Enable sensors.
@@ -75,12 +80,22 @@ void setup() {
       ag.PMS_Init();
   }
   if(hasCO2){
-      ag.CO2_Init();
+    S8_serial.begin(S8_BAUDRATE);
+    sensor_S8 = new S8_UART(S8_serial);
+    #ifdef disableCO2ABC
+        bool success = sensor_S8->set_ABC_period(0);  
+        if(success){
+            Serial.println("CO2 Auto Background Calibration Disabled.");
+        }
+        else{
+            Serial.println("Unable to disable CO2 Auto Background Calibration.");
+        }
+    #endif
   }
   if(hasSHT){
       ag.TMP_RH_Init(0x44);
   }
-  if(hasBME){
+  if(hasBME280){
       bme.begin();
   }
 
@@ -226,34 +241,34 @@ void showTextRectangle(String ln1, String ln2, boolean small) {
 }
 
 void getData(){
-
-  if(hasSHT){
-    TMP_RH stat = ag.periodicFetchData();
-    Temperature = stat.t;
-    Humidity = stat.rh;
-  }
-  
-  if(hasCO2){
-    String tempCO2 = ag.getCO2(3);
-    if(tempCO2 != "NULL" || tempCO2 != "17410"){
-      CO2 = tempCO2;
-    }
-  }
-  
+  // Delays allow for voltage to stablize between sensor readings to increase reading conformity. 
+  delay(200); 
   if(hasBME280){
     BME280::TempUnit tempUnit(BME280::TempUnit_Celsius);
     BME280::PresUnit presUnit(BME280::PresUnit_hPa);
     bme.read(Pressure, Temperature, Humidity, tempUnit, presUnit);
+    Pressure += PressureOffset;
+    Temperature += TemperatureOffset;
+    Humidity += HumidityOffset;
+  }
+  if(hasSHT){
+    TMP_RH stat = ag.periodicFetchData();
+    Temperature = stat.t + TemperatureOffset;
+    Humidity = stat.rh + HumidityOffset;
   }
 
+  delay(200);
+  if(hasCO2){
+      CO2 = sensor_S8->get_co2();
+  }
+
+  delay(200);
   if(hasPM){
     PM25 = ag.getPM2_Raw();
   }
-  
 }
 
 void displayData() {
-  
   display.clear();
   display.setTextAlignment(TEXT_ALIGN_LEFT);
   display.setFont(ArialMT_Plain_10);
@@ -270,16 +285,16 @@ void displayData() {
     display.drawString(64, 0, String(Temperature, 1) + " °C");
   }
   display.drawString(64, 12, String(Humidity, 1) + " %");
-  display.drawString(64, 24, CO2);
+  display.drawString(64, 24, String(CO2));
   display.drawString(64, 36, String(PM25));
   display.display();
 }
 
 void updateScreen(long now) {
-  if ((now - lastUpdate) > updateFrequency) {
+  if ((now - lastUpdate) > updateFrequency - 600) { //Subtract 600 ms for sensor delays.
     // Take a measurement at a fixed interval.
     getData();
-    //displayData();
+    displayData();
     lastUpdate = millis();
   }
 }
